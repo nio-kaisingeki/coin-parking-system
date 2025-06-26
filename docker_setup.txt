@@ -1,0 +1,360 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQLデータベース
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: parking_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Django バックエンド
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres123@db:5432/parking_db
+      - STRIPE_SECRET_KEY=sk_test_YOUR_STRIPE_SECRET_KEY
+      - STRIPE_PUBLISHABLE_KEY=pk_test_YOUR_STRIPE_PUBLISHABLE_KEY
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  # React フロントエンド
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_STRIPE_PUBLISHABLE_KEY=pk_test_YOUR_STRIPE_PUBLISHABLE_KEY
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+  # Redis (セッション・キャッシュ用)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+
+---
+# backend/Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# システム依存関係
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python依存関係
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# アプリケーションコード
+COPY . .
+
+# 静的ファイル用ディレクトリ
+RUN mkdir -p /app/staticfiles
+
+EXPOSE 8000
+
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+
+---
+# backend/requirements.txt
+Django==4.2.7
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+psycopg2-binary==2.9.7
+stripe==7.8.0
+reportlab==4.0.4
+celery==5.3.4
+redis==5.0.1
+python-decouple==3.8
+gunicorn==21.2.0
+whitenoise==6.6.0
+Pillow==10.1.0
+
+---
+# frontend/Dockerfile
+FROM node:18-alpine
+
+WORKDIR /app
+
+# パッケージファイルをコピー
+COPY package*.json ./
+
+# 依存関係インストール
+RUN npm install
+
+# アプリケーションコードをコピー
+COPY . .
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
+
+---
+# frontend/package.json
+{
+  "name": "coin-parking-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@stripe/stripe-js": "^2.1.11",
+    "@stripe/react-stripe-js": "^2.3.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lucide-react": "^0.263.1",
+    "axios": "^1.6.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "react-scripts": "5.0.1"
+  },
+  "proxy": "http://localhost:8000"
+}
+
+---
+# .env.example
+# Django設定
+DEBUG=1
+SECRET_KEY=your-secret-key-here
+DATABASE_URL=postgresql://postgres:postgres123@localhost:5432/parking_db
+
+# Stripe設定
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key
+
+# Google Maps API
+GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+
+# SendGrid (メール送信)
+SENDGRID_API_KEY=your_sendgrid_api_key
+FROM_EMAIL=noreply@your-domain.com
+
+# Redis
+REDIS_URL=redis://localhost:6379/0
+
+---
+# backend/settings/production.py
+import os
+from decouple import config
+from .base import *
+
+DEBUG = False
+
+ALLOWED_HOSTS = ['your-domain.com', 'api.your-domain.com']
+
+# データベース
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'), 
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST'),
+        'PORT': config('DB_PORT', default='5432'),
+    }
+}
+
+# セキュリティ設定
+SECURE_SSL_REDIRECT = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+
+# 静的ファイル
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# Stripe
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY')
+STRIPE_PUBLISHABLE_KEY = config('STRIPE_PUBLISHABLE_KEY')
+
+# CORS
+CORS_ALLOWED_ORIGINS = [
+    "https://your-domain.com",
+    "https://www.your-domain.com",
+]
+
+---
+# deploy/nginx.conf
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    # フロントエンド
+    location / {
+        proxy_pass http://frontend:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # API
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Django Admin
+    location /admin/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 静的ファイル
+    location /static/ {
+        proxy_pass http://backend:8000;
+    }
+}
+
+---
+# セットアップ手順（README.md）
+# コインパーキング予約システム
+
+## 🚀 クイックスタート
+
+### 1. リポジトリクローン
+```bash
+git clone https://github.com/your-username/coin-parking-system.git
+cd coin-parking-system
+```
+
+### 2. 環境変数設定
+```bash
+cp .env.example .env
+# .envファイルを編集してStripeキーなどを設定
+```
+
+### 3. Docker起動
+```bash
+docker-compose up --build
+```
+
+### 4. 初期データ投入
+```bash
+# 管理者作成
+docker-compose exec backend python manage.py createsuperuser
+
+# サンプルデータ
+docker-compose exec backend python manage.py loaddata sample_data.json
+```
+
+### 5. アクセス
+- フロントエンド: http://localhost:3000
+- Django Admin: http://localhost:8000/admin
+- API ドキュメント: http://localhost:8000/api/docs/
+
+## 📱 本番デプロイ
+
+### AWS ECS / Fargate
+```bash
+# ECS用のタスク定義とサービス設定
+aws ecs create-cluster --cluster-name parking-system
+```
+
+### Vercel + Railway
+```bash
+# フロントエンド: Vercel
+vercel --prod
+
+# バックエンド: Railway
+railway login
+railway deploy
+```
+
+## 🔧 開発環境
+
+### バックエンド開発
+```bash
+cd backend
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py runserver
+```
+
+### フロントエンド開発
+```bash
+cd frontend
+npm install
+npm start
+```
+
+## 🧪 テスト
+```bash
+# バックエンドテスト
+docker-compose exec backend python manage.py test
+
+# フロントエンドテスト
+docker-compose exec frontend npm test
+```
+
+## 📊 監視・分析
+- Sentry (エラー監視)
+- Google Analytics (利用分析)
+- Stripe Dashboard (決済監視)
