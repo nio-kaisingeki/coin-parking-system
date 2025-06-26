@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: parking_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres123@db:5432/parking_db
+    depends_on:
+      - db
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "python manage.py migrate && \
+             python manage.py runserver 0.0.0.0:8000"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
